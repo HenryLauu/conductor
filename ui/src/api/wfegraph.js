@@ -1,4 +1,5 @@
 import clone from "lodash/fp/clone";
+import isEmpty from "lodash/fp/isEmpty";
 
 class Workflow2Graph {
 
@@ -17,7 +18,17 @@ class Workflow2Graph {
 
     const forks = [];
     const tasks = wfe.tasks || [];
+    this.executedTasks = {};
     tasks.forEach(tt=>{
+      this.executedTasks[tt.referenceTaskName] = {
+        status: tt.status,
+        input: tt.inputData,
+        output: tt.outputData,
+        taskType: tt.taskType,
+        reasonForIncompletion:
+        tt.reasonForIncompletion,
+        task: tt
+      };
       if(tt.taskType === 'FORK'){
         let wfts = [];
         let forkedTasks = tt.inputData && tt.inputData.forkedTasks || [];
@@ -26,19 +37,29 @@ class Workflow2Graph {
         });
         forks[tt.referenceTaskName] = wfts;
       }
-    });
+
+    }, this);
 
     let nodes = [];
     let vertices = {};
-
-    this.executedTasks = {};
-    let joins = {};
     wfe.tasks.forEach(t => {
-      this.executedTasks[t.referenceTaskName] = {status: t.status, input: t.inputData, output: t.outputData, taskType: t.taskType, reasonForIncompletion: t.reasonForIncompletion, task: t};
-      if(t.taskType === 'JOIN' ){
-        joins[t.referenceTaskName] = t.inputData.joinOn;
+      // remove __N suffix because DO_WHILE has this suffix in referenceTaskName
+      this.executedTasks[t.referenceTaskName.split('__')[0]] = {status: t.status, input: t.inputData, output: t.outputData, taskType: t.taskType, reasonForIncompletion: t.reasonForIncompletion, task: t};
+    })
+    // Go through each JOIN in the workflow and build up a mapping to their joinOn data
+    this.joinOnTaskMapping = {};
+    metaTasks.forEach(t => {
+      if(t.type === 'JOIN' && !isEmpty(t.joinOn)) {
+        t.joinOn.forEach(jot => {
+          let allJots = this.joinOnTaskMapping[jot];
+          if (isEmpty(allJots)) {
+            allJots = new Set();
+          }
+          allJots.add(t.taskReferenceName);
+          this.joinOnTaskMapping[jot] = allJots;
+        });
       }
-    });
+    }, this);
 
     this.executedTasks['final'] = {status: '', input: '', output: wfe.output, taskType: 'final', reasonForIncompletion: wfe.reasonForIncompletion, task: {}};
     this.executedTasks['start'] = {status: 'STARTED', input: wfe.input, output: '', taskType: 'final', reasonForIncompletion: '', task: {}};
@@ -255,7 +276,42 @@ class Workflow2Graph {
         }
         nodes.push({type: 'simple', from: t1.taskReferenceName, to: t2.taskReferenceName, label: '', style: style});
 
+      } else if(t1.type == 'DO_WHILE'){
+
+      // vertice for DO_WHILE task
+      vertices[t1.taskReferenceName] = {name: 'DO_WHILE', ref: t1.taskReferenceName, type: 'simple', style: 'fill: #ff0', shape: 'circle', system: true, description: t1.description};
+
+      let tasks = t1.loopOver || [];
+
+      // vertice for the first task in DO_WHILE
+      vertices[tasks[0].taskReferenceName] = {name: tasks[0].name, ref: tasks[0].taskReferenceName, type: tasks[0].type, style: '', shape: 'rect', description: tasks[0].description};
+
+      let style = defstyle;
+      if(this.executedTasks[tasks[0].taskReferenceName] != null && this.executedTasks[t1.taskReferenceName] != null){
+        style = executed;
       } else {
+        isExecuting = false;
+      }
+
+      // edge from DO_WHILE task to the first task in DO_WHILE
+      nodes.push({type: 'simple', from: t1.taskReferenceName, to: tasks[0].taskReferenceName, label: '', style: style});
+
+      // go into DO_WHILE inner tasks
+      this.getTaskNodes(vertices, nodes, tasks, forks, subworkflows);
+      // vertice for the last task in DO_WHILE, and edge from the last task in DO_WHILE to DO_WHILE
+      this.getNodes(vertices, nodes, tasks[tasks.length-1], t1, forks, subworkflows);
+
+      style = defstyle;
+      if(this.executedTasks[tasks[tasks.length-1].taskReferenceName] != null && this.executedTasks[t2.taskReferenceName] != null){
+        style = executed;
+      } else {
+        isExecuting = false;
+      }
+
+      // edge from the last task in DO_WHILE to t2
+      nodes.push({type: 'simple', from: tasks[tasks.length-1].taskReferenceName, to: t2.taskReferenceName, label: '', style: style});
+
+    } else {
         vertices[t1.taskReferenceName] = {name: t1.name, ref: t1.taskReferenceName, type: 'simple', style: '', shape: 'rect', description: t1.description};
 
         let style = defstyle;
@@ -264,7 +320,15 @@ class Workflow2Graph {
         } else {
           isExecuting = false;
         }
-        nodes.push({type: 'simple', from: t1.taskReferenceName, to: t2.taskReferenceName, label: '', style: style});
+
+        // See if this is referenced by a joinOn, and point the node/edge "to" those joins
+        if (this.joinOnTaskMapping[t1.taskReferenceName]) {
+          this.joinOnTaskMapping[t1.taskReferenceName].forEach(joinRefName => {
+            nodes.push({type: 'simple', from: t1.taskReferenceName, to: joinRefName, label: '', style: style});
+          }, this);
+        } else {
+          nodes.push({type: 'simple', from: t1.taskReferenceName, to: t2.taskReferenceName, label: '', style: style});
+        }
     }
     return nodes;
 
